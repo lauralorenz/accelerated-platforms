@@ -252,8 +252,14 @@ if __name__ == "__main__":
     # Saves memory and speeds up training considerably
     group_by_length = True
 
+    # Checkpoint save strategy
+    save_strategy = "steps"
+
     # Save checkpoint every X updates steps
-    save_steps = 0
+    save_steps = 1
+
+    # Total number of checkpoints kept
+    save_total_limit = 5
 
     # Log every X updates steps
     logging_steps = 50
@@ -324,7 +330,9 @@ if __name__ == "__main__":
         output_dir=save_model_path,
         packing=packing,
         per_device_train_batch_size=per_device_train_batch_size,
+        save_strategy=save_strategy,
         save_steps=save_steps,
+        save_total_limit=save_total_limit,
         warmup_ratio=warmup_ratio,
         weight_decay=weight_decay,
     )

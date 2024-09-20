@@ -8,21 +8,17 @@ There are three common strategies for inference on vLLM:
 
 In this guide, you will serve a fine-tuned Gemma large language model (LLM) using graphical processing units (GPUs) on Google Kubernetes Engine (GKE) with the vLLM serving framework with the above mentioned deployment strategies. You can choose to swap the Gemma model with any other fine-tuned or instruction based model for inference on GKE.
 
-- Single GPU (no distributed inference)
+- Single GPU (no distributed inference) - If your model fits in a single GPU, you probably don’t need to use distributed inference. Just use the single GPU to run the inference.
 
-If your model fits in a single GPU, you probably don’t need to use distributed inference. Just use the single GPU to run the inference.
-
-- Single-Node Multi-GPU (tensor parallel inference)
-
-If your model is too large to fit in a single GPU, but it can fit in a single node with multiple GPUs, you can use tensor parallelism. The tensor parallel size is the number of GPUs you want to use. For example, if you need 4 GPUs, you can set the tensor parallel size to 4.
+- Single-Node Multi-GPU (tensor parallel inference) - If your model is too large to fit in a single GPU, but it can fit in a single node with multiple GPUs, you can use tensor parallelism. The tensor parallel size is the number of GPUs you want to use. For example, if you need 4 GPUs, you can set the tensor parallel size to 4.
 
 By the end of this guide, you should be able to perform the following steps:
 
-1. Create a Persistent Disk for the LLM model weights.
-1. Deploy a vLLM container to your cluster to host your model.
-1. Use vLLM to serve the Gemma7B model through curl and a web chat interface.
-1. View Production metrics for your model serving on GKE
-1. Use custom metrics and HPA to scale your model deployments(instances) on GKE.
+1. Create a Persistent Disk for the LLM model weights
+1. Deploy a vLLM container to your cluster to host your model
+1. Use vLLM to serve the fine-tuned Gemma model
+1. View Production metrics for your model serving
+1. Use custom metrics and Horizontal Pod Autoscaler (HPA) to scale your model
 
 ## Prerequisites
 
@@ -62,6 +58,7 @@ By the end of this guide, you should be able to perform the following steps:
   IMAGE_NAME=<your-image-name>
   DISK_NAME=<your-disk-name>
   ZONE=<your-disk-zone>
+  ACCELERATOR_TYPE=<accelerator_type> # nvidia-l4 | nvidia-tesla-a100
   ```
 
 - Get Credentials for the GKE cluster
@@ -74,8 +71,8 @@ By the end of this guide, you should be able to perform the following steps:
 
   ```sh
   gcloud storage buckets add-iam-policy-binding "gs://$V_MODEL_BUCKET" \
-  --member "principal://iam.googleapis.com/projects/"$PROJECT_NUMBER"/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/$NAMESPACE/sa/$KSA" \
-  --role "roles/storage.objectViewer"
+    --member "principal://iam.googleapis.com/projects/"${PROJECT_NUMBER}"/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/$NAMESPACE/sa/$KSA" \
+    --role "roles/storage.objectViewer"
   ```
 
 - Update the bucket access level to uniform.
@@ -99,7 +96,6 @@ Loading model weights from a Persistent Volume is a method to load models faster
   ```sh
   sed -i -e "s|_YOUR_BUCKET_NAME_|${V_MODEL_BUCKET}|" manifests/batch_job_download_model_on_pv_volume.yaml
   kubectl create -f manifests/batch_job_download_model_on_pv_volume.yaml
-  kubectl logs  module-download-job-ptdpt-6cq8r
   ```
 
 1. Wait for the job to show completion.
@@ -112,10 +108,7 @@ Loading model weights from a Persistent Volume is a method to load models faster
 
   ```sh
   PV_NAME="$(kubectl get pvc/block-pvc-model -o jsonpath='{.spec.volumeName}')"
-  ```
-
-  ```sh
-  DISK_REF="$(kubectl get pv "$PV_NAME"  -o jsonpath='{.spec.csi.volumeHandle}')"
+  DISK_REF="$(kubectl get pv "$PV_NAME" -o jsonpath='{.spec.csi.volumeHandle}')"
   ```
 
   ```sh
@@ -127,7 +120,7 @@ Loading model weights from a Persistent Volume is a method to load models faster
   --type=pd-ssd --zone=${ZONE} --image=model-weights-image
   ```
   
-  > Note: Choose a zone based on cluster location and gpu availability
+  > Note: Choose the appropriate zone based on cluster location and GPU availability
 
   ```sh
   sed -i -e "s|_NAMESPACE_|${NAMESPACE}|" manifests/volume-prep/pv-and-pvc.yaml
@@ -139,16 +132,13 @@ Loading model weights from a Persistent Volume is a method to load models faster
 - Run the batch job to deploy model using persistent disk on GKE.
 
   ```sh
-  NAMESPACE=<your-inference-namespace>
-  ACCELERATOR_TYPE=<gpu-accelerator-type> #e.g nvidia-l4
-
   sed -i -e "s|_NAMESPACE_|${NAMESPACE}|" manifests/volume-prep/batch-job-model-deployment.yaml
   sed -i -e "s|_ACCELERATOR_TYPE_|${ACCELERATOR_TYPE}|" manifests/volume-prep/batch-job-model-deployment.yaml
   ```
 
   ```sh
   kubectl create -f manifests/model_deployment.yaml
-  kubectl describe pods vllm-openai-<replace-the-pod-name> -n ${NAMESPACE}
+  kubectl logs -f -l app=vllm-openai -n ${NAMESPACE}
   ```
 
   ```sh
@@ -163,7 +153,7 @@ Loading model weights from a Persistent Volume is a method to load models faster
 - Test your deployed model through the CLI
 
   ```sh
-  kubectl port-forward svc/vllm-openai -n ${NAMESPACE} 8000:8000
+  kubectl port-forward svc/vllm-openai -n ${NAMESPACE} 8000
   ```
 
   Run the curl prompt with your values
@@ -185,7 +175,7 @@ Loading model weights from a Persistent Volume is a method to load models faster
     }'  
   ```
 
-- You can also deploy gradio chat interface to view the model chat interface. [OPTIONAL]
+- You can also deploy a gradio chat interface to view the model chat interface. [OPTIONAL]
 
   ```sh
   sed -i -e "s|_NAMESPACE_|${NAMESPACE}|" manifests/gradio.yaml
@@ -197,11 +187,10 @@ Loading model weights from a Persistent Volume is a method to load models faster
 vLLM exposes a number of metrics that can be used to monitor the health of the system. These metrics are exposed via the `/metrics` endpoint on the vLLM OpenAI compatible API server.
 
   ```sh
-  kubectl exec -it vllm-openai-6cdc44d69-hrlkz -n ml-serve -- bash
-  curl http://vllm-openai:8000/metrics
+  curl http://localhost:8000/metrics
   ```
 
-### View Production metrics for your model serving on GKE
+### View vLLM serving metrics for your model on GKE
 
 You can configure monitoring of the metrics above using the [pod monitoring](https://cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed#gmp-pod-monitoring)
 
@@ -209,7 +198,7 @@ You can configure monitoring of the metrics above using the [pod monitoring](htt
   kubectl apply -f manifests/pod_monitoring.yaml
   ```
 
-### Import the vLLM metrics into cloud monitoring
+### Create a dashboard for Cloud Monitoring to view vLLM metrics
 
 Cloud Monitoring provides an [importer](https://cloud.google.com/monitoring/dashboards/import-grafana-dashboards) that you can use to import dashboard files in the Grafana JSON format into Cloud Monitoring
 
@@ -247,14 +236,17 @@ You can refer to the documentation to [set up](https://docs.locust.io/en/stable/
 We have created a sample [locustfile](https://docs.locust.io/en/stable/writing-a-locustfile.html) to run tests against our model using sample prompts which we tried earlier in the exercise.
 Here is a sample ![graph](./benchmarks/locust.jpg) to review.
 
-If you have a local set up for locust. You can execute the tests using following :
+- Install the locust library locally:
 
-```sh
-cd benchmarks
-$locust
-```
+  ```sh
+  pip3 install locust==2.29.1
+  ```
 
-You can update the service end point of model to LoadBalancer(type) to ensure you can reach the hosted model's endpoint outside the ml-serve namespace . You can access the model endpoint using correct [annotation](https://cloud.google.com/kubernetes-engine/docs/concepts/service-load-balancer#load_balancer_types)
+- Launch the benchmark python script for locust
+
+  ```sh
+  benchmarks/locust.py
+  ```
 
 ### Inference at Scale
 
@@ -277,7 +269,7 @@ GPU Memory Usage (DCGM_FI_DEV_FB_USED) - Measures how much GPU memory is being u
 ```
 
 1. CPU metrics: Since the inference workloads primarily rely on GPU resources, we don't recommend CPU and memory utilization as the only indicators of the amount of resources a job consumes. Therefore, using CPU metrics alone for autoscaling can lead to suboptimal performance and costs.
- 
+
 HPA is an efficient way to ensure that your model servers scale appropriately with load. Fine-tuning the HPA settings is the primary way to align your provisioned hardware cost with traffic demands to achieve your inference server performance goals.
 
 We recommend setting these HPA configuration options:
@@ -298,10 +290,9 @@ We have couple of options to scale the inference workload on GKE using the HPA a
 1. Scale pod on the same node as the existing inference workload.
 2. Scale pod on the other nodes in the same node pool as the existing inference workload.
 
-
 #### Prepare your environment to autoscale with HPA metrics
 
-Install the Custom Metrics Adapter. This adapter makes the custom metric that you exported to Cloud Monitoring visible to the Horizontal Pod Autoscaler (HPA) controller. For more details, see HPA in the Google Cloud Managed Service for Prometheus documentation.
+Install the Custom Metrics Adapter. This adapter makes the custom metric that you exported to Cloud Monitoring visible to the HPA. For more details, see HPA in the [Google Cloud Managed Service for Prometheus documentation](https://cloud.google.com/stackdriver/docs/managed-prometheus/hpa).
 
 1. The following example command shows how to install the adapter:
 
@@ -320,21 +311,19 @@ Select **ONE** of the options below `Queue-depth` or `Batch-size` to configure t
 - Queue-depth
 
   ```sh
-  NAMESPACE=ml-serve
   kubectl apply -f manifests/inference-scale/hpa-vllm-openai-queue-size.yaml -n ${NAMESPACE}
   ```
 
 - Batch-size
 
   ```sh
-  NAMESPACE=ml-serve
   kubectl apply -f manifests/inference-scale/hpa-vllm-openai-batch-size.yaml -n ${NAMESPACE}
   ```
 
 > Note: Below is an example of the batch size HPA scale test below:
 
 ```sh
-kubectl get  hpa vllm-openai-hpa -n ml-serve --watch
+kubectl get hpa vllm-openai-hpa -n ${NAMESPACE} --watch
 NAME              REFERENCE                TARGETS   MINPODS   MAXPODS   REPLICAS   AGE
 vllm-openai-hpa   Deployment/vllm-openai   0/10      1         5         1          6d16h
 vllm-openai-hpa   Deployment/vllm-openai   13/10     1         5         1          6d16h
@@ -347,7 +336,7 @@ vllm-openai-hpa   Deployment/vllm-openai   10/10     1         5         2      
 ```
 
 ```sh
-kubectl get pods -n ml-serve --watch
+kubectl get pods -n ${NAMESPACE} --watch
 NAME                           READY   STATUS      RESTARTS   AGE
 gradio-6b8698d7b4-88zm7        1/1     Running     0          10d
 model-eval-2sxg2               0/1     Completed   0          8d
